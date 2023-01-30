@@ -1,0 +1,92 @@
+Pyspark
+
+bin/zookeeper-server-start.sh config/zookeeper.properties
+
+bin/kafka-server-start.sh config/server.properties
+
+bin/kafka-topics.sh --create --bootstrap-server localhost:9092 --replication-factor 1 --partitions 1 --topic test
+
+bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+
+python3 producer.py
+
+bin/pyspark --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import split, col
+import pymongo
+from pymongo import MongoClient
+df = spark.readStream.format("kafka").option("kafka.bootstrap.servers","localhost:9092").option("subscribe", "test").load()
+def insert_data(data):
+	id = data.key.decode()
+	value = data.value.decode().split(",")
+	id = value[0]
+	columns = value[2:]
+	mongo_client = MongoClient("mongodb://localhost:27017/")
+	mongo_db = mongo_client["project"]
+	db_collection = mongo_db["bigdata"]
+	_ = db_collection.insert_one({"id":id,"data": columns})
+
+df.writeStream.foreach(insert_data).start()
+
+
+Mongo
+
+sudo systemctl start mongod.service
+sudo systemctl status mongod
+mongo
+
+use project
+db.bigdata.find()
+
+
+New Pyspark
+
+import pymongo
+from pymongo import MongoClient
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.linalg import Vectors
+import pandas as pd
+from pyspark.ml.regression import LinearRegression
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import OneHotEncoder
+from pyspark.ml.feature import StringIndexer, Bucketizer
+from pyspark.sql.types import IntegerType
+from pyspark.sql.functions import col
+from pyspark.ml.evaluation import RegressionEvaluator
+mongo_client = MongoClient("mongodb://localhost:27017/")
+mongo_db = mongo_client["project"]
+db_collection = mongo_db["bigdata"]
+
+required_features = ['carrier','origin','dest','crsdephour','crsdeptime','depdelay','crsarrtime','arrdelay','crselapsedtime','dist']
+
+while True: 
+	data = db_collection.find({"dist":{"$exists":False}})
+	for ii in data:
+		features = ii["data"]
+		dataframe = pd.DataFrame([features], columns=required_features)
+		df = spark.createDataFrame(dataframe)
+		df = df.withColumn("carrier",col("carrier").cast(IntegerType())).withColumn("origin",col("origin").cast(IntegerType())).withColumn("dest",col("dest").cast(IntegerType())).withColumn("crsdephour",col("crsdephour").cast(IntegerType())).withColumn("crsdeptime",col("crsdeptime").cast(IntegerType())).withColumn("depdelay",col("depdelay").cast(IntegerType())).withColumn("crsarrtime",col("crsarrtime").cast(IntegerType())).withColumn("arrdelay",col("arrdelay").cast(IntegerType())).withColumn("crselapsedtime",col("crselapsedtime").cast(IntegerType())).withColumn("dist",col("dist").cast(IntegerType()))
+		featureassembler = VectorAssembler(inputCols=['crsdephour','crsdeptime','depdelay','crsarrtime','arrdelay','crselapsedtime'],outputCol='Independent Features')
+		output = featureassembler.transform(df)
+		finalized_data = output.select("Independent Features","dist")
+		lr = LinearRegression(featuresCol = "Independent Features", labelCol = "dist", predictionCol = "prediction")
+		model = lr.fit(finalized_data)
+		predictions = model.transform(finalized_data)
+		(dist, prediction) = predictions.select('dist','prediction').first()[0], predictions.select('dist','prediction').first()[1]
+		mongo_client = MongoClient("mongodb://localhost:27017/")
+		mongo_db = mongo_client["result"]
+		db_collection = mongo_db["score"]
+		mongo_insert = db_collection.insert_one({"dist":dist, "prediction":prediction})
+
+
+
+Mongo
+
+use result
+db.score.find()
+
+/////////////
+To run streamlit py file
+streamlit run result.py

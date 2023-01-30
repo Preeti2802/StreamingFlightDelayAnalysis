@@ -1,0 +1,96 @@
+KAFKA
+bin/zookeeper-server-start.sh config/zookeeper.properties
+
+bin/kafka-server-start.sh config/server.properties
+
+bin/kafka-topics.sh --create --bootstrap-server localhost:9092 --replication-factor 1 --partitions 1 --topic bdaflight
+
+bin/kafka-console-producer.sh --broker-list localhost:9092 --topic bdaflight < /home/preeti/flightdelay/data/flights20170304.json
+bin/kafka-console-producer.sh --broker-list localhost:9092 --topic bdaflight < /home/preeti/flightdelay/data/flights20170102.json
+
+SPARK---Kafka and spark,mongodb connector packages loaded
+./bin/spark-shell --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1,org.mongodb.spark:mongo-spark-connector_2.12:10.1.0
+
+import org.apache.spark._
+import org.apache.spark.ml._
+import org.apache.spark.ml.feature._
+import org.apache.spark.ml.classification._
+import org.apache.spark.ml.evaluation._
+import org.apache.spark.ml.tuning._
+import org.apache.spark.sql._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+
+import spark.implicits._
+import org.apache.spark.sql.functions.split
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.streaming.Trigger
+import org.apache.spark.sql.types.{StructType, StructField,StringType, IntegerType,DoubleType}
+import org.apache.spark.sql.functions.col
+
+val retailDataSchema = new StructType().add("_id", StringType).add("dofW", IntegerType).add("carrier", StringType).add("origin", StringType).add("dest", StringType).add("crsdephour", IntegerType).add("crsdeptime", IntegerType).add("depdelay", DoubleType).add("crsarrtime", IntegerType).add("arrdelay", DoubleType).add("crselapsedtime", DoubleType).add("dist", DoubleType)
+val spark=SparkSession.builder().appName("mlmodel").master("local").getOrCreate()
+val df = spark.read.option("header", "true").schema(retailDataSchema).json("/home/preeti/flightdelay/data/flights20170102.json")
+val delaybucketizer = new Bucketizer().setInputCol("depdelay").setOutputCol("delayed").setSplits(Array(0.0, 40.0, Double.PositiveInfinity))
+val df4 = delaybucketizer.transform(df)
+val fractions = Map(0.0 -> .29, 1.0 -> 1.0)
+val strain = df4.stat.sampleBy("delayed", fractions, 36L)
+val categoricalColumns = Array("carrier", "origin", "dest", "dofW")
+val stringIndexers = categoricalColumns.map { colName =>
+      new StringIndexer()
+        .setInputCol(colName)
+        .setOutputCol(colName + "Indexed")
+       .fit(df)
+}
+val encoders = categoricalColumns.map { colName =>
+      new OneHotEncoder()
+        .setInputCol(colName + "Indexed")
+        .setOutputCol(colName + "Enc")
+}
+val labeler = new Bucketizer().setInputCol("depdelay").setOutputCol("label").setSplits(Array(0.0, 40.0, Double.PositiveInfinity))
+val featureCols = Array("carrierEnc", "destEnc", "originEnc","dofWEnc", "crsdephour", "crselapsedtime", "crsarrtime", "crsdeptime", "dist")
+val assembler = new VectorAssembler().setInputCols(featureCols).setOutputCol("features")
+val dTree = new LogisticRegression().setMaxIter(10).setElasticNetParam(0.8)
+val steps = stringIndexers ++ encoders ++ Array(labeler, assembler, dTree)
+val pipeline = new Pipeline().setStages(steps)
+val paramGrid = new ParamGridBuilder().addGrid(dTree.regParam, Array(0.1, 0.2, 0.01)).build()
+val evaluator = new MulticlassClassificationEvaluator().setLabelCol("label").setPredictionCol("prediction").setMetricName("accuracy")
+val crossval = new CrossValidator().setEstimator(pipeline).setEvaluator(evaluator).setEstimatorParamMaps(paramGrid).setNumFolds(3)
+val ntrain = strain.drop("delayed").drop("arrdelay")
+val cvModel = crossval.fit(ntrain)
+
+val predictions = cvModel.transform(df)
+val accuracy = evaluator.evaluate(predictions)
+
+spark.sparkContext.setLogLevel("ERROR")
+spark.conf.set("spark.sql.shuffle.partitions","2")
+val spark=SparkSession.builder().appName("iwk").master("local").getOrCreate()
+val kafkaDf=spark.readStream.format("kafka").option("kafka.bootstrap.servers","localhost:9092").option("failOnDataLoss", "false").option("subscribe","bdaflight").option("startingOffsets","earliest").load.select($"value".cast("string").alias("value"))
+val retailDataSchema = new StructType().add("_id", StringType).add("dofW", IntegerType).add("carrier", StringType).add("origin", StringType).add("dest", StringType).add("crsdephour", IntegerType).add("crsdeptime", IntegerType).add("depdelay", DoubleType).add("crsarrtime", IntegerType).add("arrdelay", DoubleType).add("crselapsedtime", DoubleType).add("dist", DoubleType)
+val options = Map("escape" -> "#")
+val new1=kafkaDf.select(from_json(col("value"), retailDataSchema, options).alias("ghw_1"))
+val new2=new1.select("ghw_1.*")
+val new3 = new2.where(col(colName="_id") =!= "_id")
+val predictions_test = cvModel.transform(new3)
+
+val selection=predictions_test.drop("carrierIndexed","originIndexed","destIndexed","dofWIndexed","carrierEnc","originEnc","destEnc","dofWEnc","features","rawPrediction","probability")
+
+val query = selection.writeStream .format("mongodb").outputMode("append").option("checkpointLocation", "checkpoint").option("spark.mongodb.connection.uri", "mongodb://127.0.0.1").option("spark.mongodb.database", "flight").option("spark.mongodb.collection", "logistic").trigger(Trigger.ProcessingTime("1 minute")).start()
+
+MONGODB
+
+sudo systemctl start mongod.service
+
+use flight
+db.createCollection("logistic")
+
+db.logistic.find({"prediction":1},{"_id":1,"origin":1,"dest":1})
+
+///////////
+Worst states for delays
+On a similar note, we also want to discover which states experience the worst delays. The following query finds the states with the highest average delays,
+ which is also represented in the graph below:
+db.logistic.aggregate(
+	{$match:{"prediction":1}},
+	{"$group" : {"_id" : "$dest" , delay : {"$avg": "$depdelay"}}},
+	{"$sort" : {"delay" : -1}})
