@@ -1,5 +1,3 @@
-from pathlib import Path
-
 # Create a text-based README (not markdown-heavy, plain format)
 readme_text = """REAL-TIME FLIGHT DELAY AND DISTANCE PREDICTION
 -------------------------------------------------
@@ -125,9 +123,3 @@ TEAM MEMBERS:
 
 Department of CSE, Amrita School of Engineering, Bangalore
 -------------------------------------------------
-
-# Save text file
-readme_text_path = Path("/mnt/data/README_FlightPrediction.txt")
-readme_text_path.write_text(readme_text, encoding="utf-8")
-
-readme_text_path
