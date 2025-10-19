@@ -1,5 +1,4 @@
-# Create a text-based README (not markdown-heavy, plain format)
-readme_text = """REAL-TIME FLIGHT DELAY AND DISTANCE PREDICTION
+#REAL-TIME FLIGHT DELAY AND DISTANCE PREDICTION
 -------------------------------------------------
 
 PROJECT OVERVIEW:
